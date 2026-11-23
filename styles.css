@@ -189,3 +189,25 @@ body.readonly [data-edit]{display:none!important}
 code{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px;background:color-mix(in srgb,var(--ink) 7%,transparent);padding:1px 5px;border-radius:4px}
 .chassis.wide .axle{max-width:460px;grid-template-columns:1fr 90px 1fr}
 .chassis.wide .tyre{width:28px}
+
+/* ---------- driver phone screen ---------- */
+.drv{max-width:560px;width:100%;margin:0 auto;display:flex;flex-direction:column;gap:14px}
+.drv-head{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.drv-head h2{font-size:30px}
+.big{font-size:18px!important;padding:12px!important}
+.btn.big{width:100%;padding:14px;font-size:18px}
+.drv-items{display:flex;flex-direction:column}
+.drv-item{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;padding:10px 0;border-top:1px solid var(--line)}
+.drv-item:first-child{border-top:0}
+.drv-name{flex:1 1 180px;font-weight:600}
+.drv-item.fault .drv-name{color:var(--over)}
+.seg{display:flex;border:1px solid var(--line);border-radius:9px;overflow:hidden}
+.seg button{font:600 15px var(--body);border:0;background:var(--surface);color:var(--ink);padding:10px 14px;min-width:58px;cursor:pointer}
+.seg button+button{border-left:1px solid var(--line)}
+.seg button.on{background:var(--ok);color:#fff}
+.seg button.fault.on{background:var(--over)}
+.seg button[data-s="na"].on{background:var(--unk)}
+.drv-note{flex-basis:100%;font-family:var(--body);font-size:16px}
+.drv-done{align-items:center;text-align:center;display:flex;flex-direction:column;gap:12px;padding:30px 18px}
+.drv-done .tick{width:64px;height:64px;border-radius:50%;background:var(--brand);color:var(--brand-ink);font:700 36px/64px var(--body)}
+.drv-done p{margin:0}

@@ -14,3 +14,6 @@ Tracks services, tyres by wheel position, registration and COI for Brisbane Mach
 - `km-parse.js`: reads MyTrucking km reports
 - `database-setup.sql`: paste into Supabase's SQL Editor once
 - `sync-km.mjs`: automatic daily km, for later, once MyTrucking or your GPS provider offers a data feed
+- `defect-alerts.mjs` and `defect-alerts.yml`: emails you when a driver reports a defect (the .yml goes in `.github/workflows/`)
+
+**Driver checks:** drivers sign in on their phone and do the Monday odometer reading and prestart. Add them under Settings › People with the **Driver** role.

@@ -17,7 +17,7 @@ const require = createRequire(import.meta.url);
 const { parseImport } = require("./km-parse.js");
 
 const env = k => (process.env[k] || "").trim();
-const SUPABASE_URL = env("SUPABASE_URL").replace(/\/$/, ""), KEY = env("SUPABASE_SERVICE_KEY"), COMPANY = env("COMPANY_ID");
+const SUPABASE_URL = (() => { try { return new URL(env("SUPABASE_URL")).origin; } catch { return env("SUPABASE_URL"); } })(), KEY = env("SUPABASE_SERVICE_KEY"), COMPANY = env("COMPANY_ID");
 const SOURCE = env("KM_SOURCE_URL"), TOKEN = env("KM_SOURCE_TOKEN");
 
 const missing = ["SUPABASE_URL", "SUPABASE_SERVICE_KEY", "COMPANY_ID", "KM_SOURCE_URL"].filter(k => !env(k));

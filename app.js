@@ -37,14 +37,22 @@ const LAYOUTS = {
   "ll3": { label: "Low loader · 3 axle lines, 8 tyres per row (24)", axles: [{ n: "Row 1", d: 2 }, { n: "Row 2", d: 2 }, { n: "Row 3", d: 2 }] },
   "ll4": { label: "Low loader · 4 axle lines, 8 tyres per row (32)", axles: [{ n: "Row 1", d: 2 }, { n: "Row 2", d: 2 }, { n: "Row 3", d: 2 }, { n: "Row 4", d: 2 }] },
 };
+const DEFAULT_PRESTART = [
+  "Tyres & wheel nuts", "Lights & indicators", "Brakes & air system (no leaks)", "Engine oil & coolant levels",
+  "No fluid leaks under vehicle", "Mirrors, windscreen & wipers", "Horn & reversing alarm", "Seatbelts",
+  "Tilt tray / deck hydraulics", "Winch & winch cable", "Ramps & deck pins", "Chains, straps & load restraints",
+  "Trailer coupling, lights & tyres (if towing)", "Fire extinguisher"];
+const prestartItems = () => (Array.isArray(S.settings.prestartItems) && S.settings.prestartItems.length) ? S.settings.prestartItems : DEFAULT_PRESTART;
+const needsCheck = t => !isTrailerType(t.type) && !isLightType(t.type);
+function weekStart(iso) { const dow = new Date(toUTC(iso)).getUTCDay(); return addDays(iso, -((dow + 6) % 7)); }
 const SIDE = { L: "left", R: "right", LO: "left outer", LI: "left inner", RI: "right inner", RO: "right outer",
   L1: "left 1 (outside)", L2: "left 2", L3: "left 3", L4: "left 4 (inside)", R4: "right 4 (inside)", R3: "right 3", R2: "right 2", R1: "right 1 (outside)" };
 const SIDES = d => d === 2 ? [["L1", "L2", "L3", "L4"], ["R4", "R3", "R2", "R1"]] : d ? [["LO", "LI"], ["RI", "RO"]] : [["L"], ["R"]];
 const spareKeys = t => { const n = has(t.spares) ? Number(t.spares) : 1; return Array.from({ length: Math.max(0, Math.min(4, n)) }, (_, i) => i ? `Spare ${i + 1}` : "Spare"); };
-const WRITE_ACTS = new Set(["starter", "add-truck", "edit-truck", "del-truck", "odo", "add-sched", "edit-sched", "done-sched", "log-service", "edit-service", "add-comp", "edit-comp", "renew-comp", "ty-tread", "ty-move", "ty-remove", "ty-edit", "ty-fit", "sample", "clear-sample", "km-import", "km-save"]);
+const WRITE_ACTS = new Set(["fix-defect", "del-check", "starter", "add-truck", "edit-truck", "del-truck", "odo", "add-sched", "edit-sched", "done-sched", "log-service", "edit-service", "add-comp", "edit-comp", "renew-comp", "ty-tread", "ty-move", "ty-remove", "ty-edit", "ty-fit", "sample", "clear-sample", "km-import", "km-save"]);
 
 /* ---------- state ---------- */
-const S = { phase: "loading", authView: "login", authMsg: "", kmDate: null, kmDraft: {}, importText: "", importTruck: "", importPreview: null, members: null };
+const S = { drv: null, phase: "loading", authView: "login", authMsg: "", kmDate: null, kmDraft: {}, importText: "", importTruck: "", importPreview: null, members: null };
 
 /* ---------- helpers ---------- */
 const $ = s => document.querySelector(s);
@@ -136,6 +144,9 @@ function allItems(M) {
     for (const s of S.schedules) if (s.truckId === t.id) items.push({ kind: "sched", t, s, ...schedStatus(s, m) });
     for (const c of S.compliance) if (c.truckId === t.id) items.push({ kind: "comp", t, c, ...compStatus(c) });
     for (const ty of S.tyres) if (ty.truckId === t.id && ty.status === "fitted") items.push({ kind: "tyre", t, ty, ...tyreStatus(ty) });
+    for (const d of S.defects || []) if (d.truckId === t.id && d.status === "open") items.push({ kind: "defect", t, d, level: "over", text: d.note || "Reported at prestart", sub: `Reported ${fmtDate(String(d.reportedAt).slice(0, 10))}${d.reportedBy ? " by " + d.reportedBy : ""}`, sortDays: -2 });
+    if ((S.checks || []).length && needsCheck(t) && !S.checks.some(c => c.truckId === t.id && c.checkDate >= weekStart(today())))
+      items.push({ kind: "check", t, level: "soon", text: "No Monday check this week", sub: `Week starting ${fmtDate(weekStart(today()))}`, sortDays: 3 });
     if (!has(t.baseOdo) && !isTrailerType(t.type)) items.push({ kind: "odo", t, level: "unknown", text: "Enter today's odometer reading", sub: "Needed to work out km-based servicing", sortDays: 1e6 });
   }
   items.sort((a, b) => RANK[a.level] - RANK[b.level] || a.sortDays - b.sortDays);
@@ -151,7 +162,8 @@ function schedule() { if (rq) return; rq = requestAnimationFrame(() => { rq = 0;
 function route() { return (location.hash || "").slice(1) || "dashboard"; }
 function renderChrome() {
   const ready = S.phase === "ready";
-  $("#nav").hidden = !ready; $("#log-btn").hidden = !ready || Store.role === "viewer";
+  const driver = Store.role === "driver";
+  $("#nav").hidden = !ready || driver; $("#log-btn").hidden = !ready || Store.role === "viewer" || driver;
   if (Store.company && Store.company.name) $("#company-name").textContent = Store.company.name;
   let chip = $("#userchip");
   if (!chip) { chip = document.createElement("span"); chip.id = "userchip"; chip.className = "userchip"; $(".top .in").appendChild(chip); }
@@ -171,8 +183,11 @@ function render() {
   const M = metrics(); let html = "";
   if (Store.mode === "demo") html += `<div class="banner warn"><b>Demo mode.</b> Everything you enter stays in this browser only. Connect the database (see the setup guide, README.md) to share it with your team.</div>`;
   if (Store.role === "viewer") html += `<div class="banner">You have view-only access. Ask the owner if you need to make changes.</div>`;
+  if (r === "driver" && Store.role !== "driver") html += `<div class="banner">This is what drivers see on their phones. <a href="#checks">Back to checks</a></div>`;
   try {
-    if (r === "trucks") html += viewTrucks(M);
+    if (Store.role === "driver" || r === "driver") html = (Store.role === "driver" ? "" : html) + viewDriver();
+    else if (r === "checks") html += viewChecks();
+    else if (r === "trucks") html += viewTrucks(M);
     else if (r === "km") html += viewKm(M);
     else if (r === "settings") html += viewSettings();
     else if (r.startsWith("t-")) html += viewTruck(r.slice(2), M);
@@ -180,6 +195,7 @@ function render() {
   } catch (e) { console.error(e); html += `<div class="banner warn">Something went wrong drawing this page: ${esc(e.message)}</div>`; }
   app.innerHTML = html;
   for (const [id, v] of Object.entries(S.kmDraft)) { const el = document.getElementById("km-" + id); if (el) el.value = v; }
+  document.querySelectorAll("#nav a").forEach(a => a.classList.toggle("on", a.dataset.v === r || (r.startsWith("t-") && a.dataset.v === "trucks") || (r === "driver" && a.dataset.v === "checks")));
   if (r === "settings" && S.members === null) loadMembers();
 }
 
@@ -192,11 +208,12 @@ function viewAuth() {
     <button class="btn primary" type="submit">Save password</button></form></div>`;
   const titles = { login: "Sign in", signup: "Create a login", forgot: "Reset your password" };
   return `<div class="auth"><form class="card" id="auth-form" data-kind="${v}"><h2>${titles[v]}</h2>${m}
-    <div class="fld"><label for="a-email">Email</label><input id="a-email" type="email" autocomplete="email" required></div>
+    <div class="fld"><label for="a-email">${v === "login" ? "Username or email" : "Email"}</label><input id="a-email" type="${v === "login" ? "text" : "email"}" autocomplete="${v === "login" ? "username" : "email"}" autocapitalize="none" spellcheck="false" required></div>
     ${v !== "forgot" ? `<div class="fld"><label for="a-pw">Password</label><input id="a-pw" type="password" autocomplete="${v === "signup" ? "new-password" : "current-password"}" minlength="${v === "signup" ? 8 : 1}" required>${v === "signup" ? "<small>At least 8 characters.</small>" : ""}</div>` : ""}
     <button class="btn primary" type="submit">${v === "login" ? "Sign in" : v === "signup" ? "Create login" : "Email me a reset link"}</button>
     <div class="links">${v === "login" ? `<button type="button" data-act="auth-view" data-v="forgot">Forgot password?</button><button type="button" data-act="auth-view" data-v="signup">Create a login</button>` : `<button type="button" data-act="auth-view" data-v="login">Back to sign in</button>`}</div>
     ${v === "signup" ? `<p class="note" style="margin:0">Staff: create your login, then ask the owner to add you under Settings › People.</p>` : ""}
+    ${v === "login" ? `<p class="note" style="margin:0">Drivers: use the username and password your manager gave you.</p>` : ""}
   </form></div>`;
 }
 function viewCreateCompany() {
@@ -217,18 +234,20 @@ function emptyFleet() {
     ${starter().length ? `<p class="muted" style="margin:14px auto 0;max-width:60ch;font-size:14px">Adds ${starter().map(v => esc(v.rego || v.name)).join(", ")} with their tyre layouts, standard service intervals, and registration and COI items ready for dates.</p>` : ""}
   </div>`;
 }
-function itemLabel(i) { return i.kind === "sched" ? i.s.name : i.kind === "comp" ? i.c.name : i.kind === "odo" ? "Odometer" : "Tyre · " + posLabel(i.ty.pos); }
+function itemLabel(i) { return i.kind === "sched" ? i.s.name : i.kind === "comp" ? i.c.name : i.kind === "odo" ? "Odometer" : i.kind === "defect" ? "Defect · " + i.d.item : i.kind === "check" ? "Driver check" : "Tyre · " + posLabel(i.ty.pos); }
 function itemAction(i) {
   if (i.kind === "sched") return i.level === "unknown" ? `<button class="btn sm" data-act="edit-sched" data-id="${i.s.id}">Set last done</button>` : `<button class="btn sm" data-act="done-sched" data-id="${i.s.id}">Mark done</button>`;
   if (i.kind === "comp") return i.level === "unknown" ? `<button class="btn sm" data-act="edit-comp" data-id="${i.c.id}">Set date</button>` : `<button class="btn sm" data-act="renew-comp" data-id="${i.c.id}">Renewed</button>`;
   if (i.kind === "odo") return `<button class="btn sm" data-act="odo" data-id="${i.t.id}">Set odometer</button>`;
+  if (i.kind === "defect") return `<button class="btn sm" data-act="fix-defect" data-id="${i.d.id}">Mark fixed</button>`;
+  if (i.kind === "check") return `<a class="btn sm" href="#checks">View checks</a>`;
   return `<button class="btn sm" data-act="tyre" data-truck="${i.t.id}" data-pos="${esc(i.ty.pos)}">Open tyre</button>`;
 }
 function itemRow(i) {
   return `<div class="row lvl-${i.level}"><span class="stripe"></span>${plate(i.t)}
     <div class="rmain"><a href="#t-${i.t.id}">${esc(itemLabel(i))}</a><small>${esc(i.t.name || "")}</small></div>
     <div class="rdetail"><span>${esc(i.text)}</span><small>${esc(i.sub || "")}</small></div>
-    ${pill(i.level)}${itemAction(i)}</div>`;
+    ${i.kind === "defect" ? '<span class="pill over">Defect</span>' : pill(i.level)}${itemAction(i)}</div>`;
 }
 function viewDashboard(M) {
   if (!S.trucks.length) return emptyFleet();
@@ -318,6 +337,7 @@ function viewTruck(id, M) {
       ${svc.map(s => `<tr><td>${fmtDate(s.date)}</td><td class="r">${fmtKm(s.odo)}</td><td><b>${esc(s.title || "Service")}</b>${(s.tasks || []).length ? `<br><small class="muted">${esc(s.tasks.join(", "))}</small>` : ""}${s.notes ? `<br><small class="muted">${esc(s.notes)}</small>` : ""}</td><td>${esc(s.workshop || "")}${s.invoice ? `<br><small class="muted">Inv ${esc(s.invoice)}</small>` : ""}</td><td class="r">${money(s.cost)}</td><td><div class="acts"><button class="btn sm link" data-act="edit-service" data-id="${s.id}">Edit</button></div></td></tr>`).join("") || '<tr><td colspan="6" class="muted">No services logged yet.</td></tr>'}
       </tbody></table></div>
       ${svc.length ? `<p class="muted" style="margin:10px 0 0;font-size:13px">Total spend recorded: <b>${money(svc.reduce((a, s) => a + (Number(s.cost) || 0), 0))}</b></p>` : ""}</section>
+    ${truckChecksHtml(t)}
   </div><div class="col">
     <section class="card"><header><h3>Tyres</h3><span class="muted">${esc((LAYOUTS[t.layout] || LAYOUTS["4x2d"]).label)}</span></header>
       ${tyreDiagram(t)}
@@ -335,6 +355,16 @@ function viewTruck(id, M) {
     <div style="text-align:right"><button class="btn danger sm" data-act="del-truck" data-id="${id}">Delete this vehicle</button></div>
   </div></div>`;
 }
+function truckChecksHtml(t) {
+  const cs = (S.checks || []).filter(c => c.truckId === t.id).sort((a, b) => String(b.checkDate).localeCompare(a.checkDate)).slice(0, 8);
+  const ds = (S.defects || []).filter(d => d.truckId === t.id && d.status === "open");
+  if (!cs.length && !ds.length) return "";
+  return `<section class="card"><header><h3>Driver checks</h3><span class="sp"></span><a class="btn sm" href="#checks">All checks</a></header>
+    ${ds.length ? `<div class="list" style="margin-bottom:12px">${ds.map(d => `<div class="row lvl-over"><span class="stripe"></span>${plate(t)}<div class="rmain"><b>${esc(d.item)}</b><small>Open defect</small></div><div class="rdetail"><span>${esc(d.note || "")}</span><small>${fmtDate(String(d.reportedAt).slice(0, 10))}</small></div><span class="pill over">Defect</span><button class="btn sm" data-act="fix-defect" data-id="${d.id}">Mark fixed</button></div>`).join("")}</div>` : ""}
+    <div class="tbl"><table><thead><tr><th>Date</th><th>Driver</th><th class="r">Odometer</th><th>Result</th></tr></thead><tbody>
+    ${cs.map(c => `<tr class="clk" data-act="view-check" data-id="${c.id}"><td>${fmtDate(c.checkDate)}</td><td>${esc(c.driverEmail || "")}</td><td class="r">${c.odo != null ? fmtKm(c.odo) : ""}</td><td>${c.faultCount ? `<span class="pill over">${c.faultCount} fault${c.faultCount > 1 ? "s" : ""}</span>` : '<span class="pill ok">All OK</span>'}</td></tr>`).join("")}
+    </tbody></table></div></section>`;
+}
 function tyreDiagram(t) {
   const L = LAYOUTS[t.layout] || LAYOUTS["4x2d"];
   const byPos = {}; for (const x of S.tyres) if (x.truckId === t.id && x.status === "fitted") byPos[x.pos] = x;
@@ -345,6 +375,124 @@ function tyreDiagram(t) {
   return `<div class="chassis${wide ? " wide" : ""}"><div class="cab">${isTrailerType(t.type) || /^(tr|ll)/.test(t.layout) ? "HITCH" : "FRONT"}</div>${L.axles.map(a => { const sd = SIDES(a.d);
     return `<div class="axle"><div class="wheels">${sd[0].map(s => cell(a.n + "|" + s)).join("")}</div><div class="axlebar"><span>${esc(a.n)}</span></div><div class="wheels">${sd[1].map(s => cell(a.n + "|" + s)).join("")}</div></div>`; }).join("")}
     ${sp.length ? `<div class="spare">${sp.map(cell).join("")}<span>${sp.length > 1 ? sp.length + " spares" : "Spare"}</span></div>` : ""}</div>`;
+}
+
+
+/* ---------- driver Monday check (phone screen) ---------- */
+function drvState() {
+  if (!S.drv) {
+    let last = ""; try { last = localStorage.getItem("bmt-driver-truck") || ""; } catch (e) {}
+    S.drv = { truckId: S.trucks.some(t => t.id === last) ? last : "", odo: "", answers: {}, notes: "", done: null, odoWarned: false };
+  }
+  return S.drv;
+}
+function viewDriver() {
+  const st = drvState(), td = today(), wk = weekStart(td);
+  const vehicles = S.trucks.filter(t => !isTrailerType(t.type)).sort(byName);
+  const mine = (S.checks || []).filter(c => Store.role !== "driver" || true).sort((a, b) => String(b.createdAt || b.checkDate).localeCompare(String(a.createdAt || a.checkDate)));
+  if (st.done) {
+    return `<div class="drv"><section class="card drv-done"><div class="tick" aria-hidden="true">✓</div><h2>Check sent</h2>
+      <p>${esc(st.done.truck)} · ${fmtDate(st.done.date)}${st.done.odo != null ? ` · ${fmtKm(st.done.odo)} km` : ""}</p>
+      ${st.done.faults ? `<p class="banner warn" style="margin:0">${st.done.faults} fault${st.done.faults > 1 ? "s" : ""} reported. The office has been told.</p>` : `<p class="muted" style="margin:0">No faults reported. Thanks!</p>`}
+      <button class="btn primary big" data-act="drv-new">Done</button></section></div>`;
+  }
+  const t = truckById(st.truckId);
+  const doneThisWeek = t && (S.checks || []).filter(c => c.truckId === t.id && c.checkDate >= wk).sort((a, b) => String(b.checkDate).localeCompare(a.checkDate))[0];
+  const items = prestartItems();
+  const answered = items.filter(i => st.answers[i] && st.answers[i].status).length;
+  const odoNum = st.odo === "" ? null : Number(st.odo);
+  const lowOdo = t && has(t.baseOdo) && odoNum != null && odoNum < Number(t.baseOdo);
+  return `<div class="drv">
+    <div class="drv-head"><h2>Monday check</h2><span class="muted">Week of ${fmtDate(wk)}</span></div>
+    <section class="card"><div class="fld"><label for="drv-truck">Vehicle</label>
+      <select id="drv-truck" class="big"><option value="">Choose your vehicle…</option>${vehicles.map(v => `<option value="${v.id}"${v.id === st.truckId ? " selected" : ""}>${esc(v.rego || "No rego")} · ${esc(v.name)}</option>`).join("")}</select></div>
+      ${doneThisWeek ? `<p class="banner" style="margin:10px 0 0">Already checked this week on ${fmtDate(doneThisWeek.checkDate)}${doneThisWeek.driverEmail ? " by " + esc(doneThisWeek.driverEmail) : ""}. Only send another if something has changed.</p>` : ""}
+    </section>
+    ${t ? `<section class="card"><div class="fld"><label for="drv-odo">Odometer reading (km)</label>
+      <input id="drv-odo" class="big" type="number" inputmode="numeric" min="0" step="1" placeholder="Read it off the dash" value="${esc(st.odo)}">
+      ${has(t.baseOdo) ? `<small>Last recorded reading: ${fmtKm(t.baseOdo)} km${t.baseOdoDate ? " (" + fmtDate(t.baseOdoDate) + ")" : ""}</small>` : ""}
+      ${lowOdo ? `<small class="err">That's lower than the last reading. Check the number, or tap Send again if it's right.</small>` : ""}</div></section>
+    <section class="card"><header><h3>Prestart</h3><span class="muted">${answered} of ${items.length} done</span><span class="sp"></span><button class="btn sm" data-act="drv-allok">Mark the rest OK</button></header>
+      <div class="drv-items">${items.map((it, i) => { const a = st.answers[it] || {}; return `<div class="drv-item ${a.status || ""}">
+        <div class="drv-name">${esc(it)}</div>
+        <div class="seg" role="group" aria-label="${esc(it)}">
+          <button type="button" class="${a.status === "ok" ? "on" : ""}" data-act="drv-ans" data-i="${i}" data-s="ok">OK</button>
+          <button type="button" class="fault ${a.status === "fault" ? "on" : ""}" data-act="drv-ans" data-i="${i}" data-s="fault">Fault</button>
+          <button type="button" class="${a.status === "na" ? "on" : ""}" data-act="drv-ans" data-i="${i}" data-s="na">N/A</button></div>
+        ${a.status === "fault" ? `<textarea class="drv-note" data-i="${i}" rows="2" placeholder="What's wrong? (required)">${esc(a.note || "")}</textarea>` : ""}
+      </div>`; }).join("")}</div></section>
+    <section class="card"><div class="fld"><label for="drv-notes">Anything else? (optional)</label><textarea id="drv-notes" rows="2" style="font-family:var(--body);font-size:16px">${esc(st.notes)}</textarea></div>
+      <p class="err" id="drv-err"></p>
+      <button class="btn primary big" data-act="drv-send">Send check</button></section>` : `<p class="muted" style="text-align:center">Choose your vehicle to start.</p>`}
+    ${Store.role === "driver" ? `<div class="chips" style="justify-content:center"><button class="btn sm" data-act="change-pw">Change my password</button><button class="btn sm" data-act="sign-out">Sign out</button></div>` : ""}
+    ${mine.length ? `<section class="card"><header><h3>Recent checks</h3></header><div class="tbl"><table><tbody>${mine.slice(0, 5).map(c => { const v = truckById(c.truckId); return `<tr><td>${fmtDate(c.checkDate)}</td><td>${esc(v ? (v.rego || v.name) : "")}</td><td class="r">${c.odo != null ? fmtKm(c.odo) + " km" : ""}</td><td>${c.faultCount ? `<span class="pill over">${c.faultCount} fault${c.faultCount > 1 ? "s" : ""}</span>` : '<span class="pill ok">OK</span>'}</td></tr>`; }).join("")}</tbody></table></div></section>` : ""}
+  </div>`;
+}
+async function sendCheck(btn) {
+  const st = drvState(), items = prestartItems(), err = $("#drv-err");
+  const t = truckById(st.truckId); if (!t) { err.textContent = "Choose your vehicle."; return; }
+  const odo = st.odo === "" ? null : Number(st.odo);
+  if (odo == null && !isTrailerType(t.type)) { err.textContent = "Enter the odometer reading."; return; }
+  if (odo != null && (!isFinite(odo) || odo < 0)) { err.textContent = "The odometer reading needs to be a number."; return; }
+  const missing = items.filter(i => !(st.answers[i] && st.answers[i].status));
+  if (missing.length) { err.textContent = `Answer every item (${missing.length} left), or tap "Mark the rest OK".`; return; }
+  const noNote = items.find(i => st.answers[i].status === "fault" && !String(st.answers[i].note || "").trim());
+  if (noNote) { err.textContent = `Add a note for "${noNote}" so the workshop knows what's wrong.`; return; }
+  if (has(t.baseOdo) && odo != null && odo < Number(t.baseOdo) && !st.odoWarned) { st.odoWarned = true; render(); return; }
+  btn.disabled = true; err.textContent = "";
+  const payload = { truckId: t.id, date: today(), odo, notes: st.notes.trim(), items: items.map(i => clean({ item: i, status: st.answers[i].status, note: st.answers[i].status === "fault" ? st.answers[i].note.trim() : undefined })) };
+  try {
+    await Store.submitCheck(payload);
+    try { localStorage.setItem("bmt-driver-truck", t.id); } catch (e) {}
+    st.done = { truck: `${t.rego || ""} ${t.name}`.trim(), date: payload.date, odo, faults: payload.items.filter(i => i.status === "fault").length };
+    render(); window.scrollTo(0, 0);
+  } catch (e) { err.textContent = e.message; btn.disabled = false; }
+}
+
+/* ---------- office: checks & defects ---------- */
+function viewChecks() {
+  const wk = weekStart(today()), checks = (S.checks || []).slice().sort((a, b) => String(b.checkDate).localeCompare(a.checkDate) || String(b.createdAt).localeCompare(String(a.createdAt)));
+  const open = (S.defects || []).filter(d => d.status === "open").sort((a, b) => String(a.reportedAt).localeCompare(String(b.reportedAt)));
+  const fixed = (S.defects || []).filter(d => d.status === "fixed").sort((a, b) => String(b.fixedAt).localeCompare(String(a.fixedAt))).slice(0, 10);
+  const vehicles = S.trucks.filter(needsCheck).sort(byName);
+  const doneCount = vehicles.filter(v => checks.some(c => c.truckId === v.id && c.checkDate >= wk)).length;
+  return `<div class="thead"><h2>Driver checks</h2><span class="sp"></span><a class="btn" href="#driver">Open the driver screen</a></div>
+  <div class="stats">
+    <div class="stat ${doneCount < vehicles.length ? "soon" : "acc"}"><b>${doneCount}/${vehicles.length}</b><span>Trucks checked this week</span></div>
+    <div class="stat ${open.length ? "over" : "acc"}"><b>${open.length}</b><span>Open defects</span></div>
+    <div class="stat"><b>${checks.filter(c => c.checkDate >= addDays(today(), -30)).length}</b><span>Checks, last 30 days</span></div>
+    <div class="stat"><b>${fmtDate(wk).replace(/ \d{4}$/, "")}</b><span>Week starting</span></div></div>
+  <section class="card"><header><h3>Open defects</h3><span class="muted">Reported by drivers, oldest first</span></header>
+    <div class="list">${open.map(d => { const t = truckById(d.truckId); return t ? `<div class="row lvl-over"><span class="stripe"></span>${plate(t)}
+      <div class="rmain"><a href="#t-${t.id}">${esc(d.item)}</a><small>${esc(t.name)}</small></div>
+      <div class="rdetail"><span>${esc(d.note || "")}</span><small>${fmtDate(String(d.reportedAt).slice(0, 10))}${d.reportedBy ? " · " + esc(d.reportedBy) : ""}</small></div>
+      <span class="pill over">Defect</span><button class="btn sm" data-act="fix-defect" data-id="${d.id}">Mark fixed</button></div>` : ""; }).join("") || '<div class="empty">No open defects.</div>'}</div></section>
+  <section class="card"><header><h3>This week</h3><span class="muted">Trucks and prime movers. Light vehicles and trailers are optional.</span></header><div class="tbl"><table>
+    <thead><tr><th>Rego</th><th>Vehicle</th><th>Checked</th><th>Driver</th><th class="r">Odometer</th><th>Result</th></tr></thead><tbody>
+    ${vehicles.map(v => { const c = checks.find(x => x.truckId === v.id && x.checkDate >= wk); return `<tr${c ? ` class="clk" data-act="view-check" data-id="${c.id}"` : ""}><td>${plate(v)}</td><td>${esc(v.name)}</td>
+      <td>${c ? fmtDate(c.checkDate) : '<span class="pill soon">Not done</span>'}</td><td>${c ? esc(c.driverEmail || "") : ""}</td><td class="r">${c && c.odo != null ? fmtKm(c.odo) : ""}</td>
+      <td>${c ? (c.faultCount ? `<span class="pill over">${c.faultCount} fault${c.faultCount > 1 ? "s" : ""}</span>` : '<span class="pill ok">All OK</span>') : ""}</td></tr>`; }).join("") || '<tr><td colspan="6" class="muted">No trucks yet.</td></tr>'}
+    </tbody></table></div></section>
+  <section class="card"><header><h3>Recent checks</h3></header><div class="tbl"><table>
+    <thead><tr><th>Date</th><th>Vehicle</th><th>Driver</th><th class="r">Odometer</th><th>Result</th></tr></thead><tbody>
+    ${checks.slice(0, 40).map(c => { const v = truckById(c.truckId); return `<tr class="clk" data-act="view-check" data-id="${c.id}"><td>${fmtDate(c.checkDate)}</td><td>${esc(v ? `${v.rego || ""} ${v.name}` : "")}</td><td>${esc(c.driverEmail || "")}</td><td class="r">${c.odo != null ? fmtKm(c.odo) : ""}</td><td>${c.faultCount ? `<span class="pill over">${c.faultCount} fault${c.faultCount > 1 ? "s" : ""}</span>` : '<span class="pill ok">All OK</span>'}</td></tr>`; }).join("") || '<tr><td colspan="5" class="muted">No checks yet. Add drivers under Settings › People and send them the site address.</td></tr>'}
+    </tbody></table></div></section>
+  ${fixed.length ? `<section class="card"><header><h3>Recently fixed</h3></header><div class="tbl"><table><thead><tr><th>Vehicle</th><th>Defect</th><th>Fixed</th><th>Note</th></tr></thead><tbody>
+    ${fixed.map(d => { const t = truckById(d.truckId); return `<tr><td>${esc(t ? t.rego || t.name : "")}</td><td>${esc(d.item)}<br><small class="muted">${esc(d.note || "")}</small></td><td>${fmtDate(String(d.fixedAt).slice(0, 10))}<br><small class="muted">${esc(d.fixedBy || "")}</small></td><td>${esc(d.fixNote || "")}</td></tr>`; }).join("")}
+  </tbody></table></div></section>` : ""}`;
+}
+function checkModal(c) {
+  const v = truckById(c.truckId);
+  showModal(`<h2>Check · ${esc(v ? `${v.rego || ""} ${v.name}` : "")}</h2>
+    <dl class="kv"><dt>Date</dt><dd>${fmtDate(c.checkDate)}</dd><dt>Driver</dt><dd>${esc(c.driverEmail || "—")}</dd><dt>Odometer</dt><dd>${c.odo != null ? fmtKm(c.odo) + " km" : "—"}</dd>${c.notes ? `<dt>Notes</dt><dd>${esc(c.notes)}</dd>` : ""}</dl>
+    <div class="tbl"><table><tbody>${(c.items || []).map(i => `<tr><td>${esc(i.item)}${i.note ? `<br><small class="muted">${esc(i.note)}</small>` : ""}</td><td class="r">${i.status === "fault" ? '<span class="pill over">Fault</span>' : i.status === "na" ? '<span class="pill unknown">N/A</span>' : '<span class="pill ok">OK</span>'}</td></tr>`).join("")}</tbody></table></div>
+    <div class="actions">${Store.role === "owner" || Store.role === "staff" ? `<button class="btn danger" data-act="del-check" data-id="${c.id}">Delete check</button>` : ""}<span class="sp"></span><button class="btn ghost" data-act="close">Close</button></div>`);
+}
+function fixForm(d) {
+  const t = truckById(d.truckId);
+  openForm({ title: `Fixed · ${d.item}`, intro: `${esc(t ? `${t.rego || ""} ${t.name}` : "")}: ${esc(d.note || "")}`,
+    fields: [{ id: "note", label: "What was done (optional)", type: "textarea", placeholder: "e.g. Replaced LH indicator globe" }],
+    submit: "Mark fixed", onSubmit: async v => { await guarded(() => Store.fixDefect(d.id, v.note)); toast("Defect marked fixed"); schedule(); } });
 }
 
 /* ---------- km page ---------- */
@@ -390,13 +538,11 @@ function viewSettings() {
   const s = S.settings, hasSample = S.trucks.some(x => x.sample), owner = Store.role === "owner";
   return `<div class="thead"><h2>Settings</h2></div>
   ${Store.mode === "live" ? `<section class="card"><header><h3>People</h3><span class="muted">Who can see and update ${esc(Store.company.name)}</span></header>
-    ${S.members === null ? '<p class="muted" style="margin:0">Loading…</p>' : `<div class="tbl"><table><thead><tr><th>Email</th><th>Access</th><th></th></tr></thead><tbody>
-      ${S.members.map(m => `<tr><td>${esc(m.email || m.userId)}</td><td>${{ owner: "Owner", staff: "Staff (can edit)", viewer: "View only" }[m.role] || esc(m.role)}</td><td><div class="acts">${owner && m.userId !== Store.user.id ? `<button class="btn sm link" data-act="rm-member" data-id="${m.userId}" data-email="${esc(m.email || "")}">Remove</button>` : ""}</div></td></tr>`).join("")}
+    ${S.members === null ? '<p class="muted" style="margin:0">Loading…</p>' : `<div class="tbl"><table><thead><tr><th>Login</th><th>Access</th><th></th></tr></thead><tbody>
+      ${S.members.map(m => `<tr><td>${esc(Store.displayLogin(m.email) || m.userId)}</td><td>${{ owner: "Owner", staff: "Staff (can edit)", viewer: "View only", driver: "Driver (Monday checks)" }[m.role] || esc(m.role)}</td><td><div class="acts">${owner ? `<button class="btn sm link" data-act="pw-member" data-id="${m.userId}" data-email="${esc(Store.displayLogin(m.email))}">Set password</button>` : ""}${owner && m.userId !== Store.user.id ? `<button class="btn sm link" data-act="rm-member" data-id="${m.userId}" data-email="${esc(Store.displayLogin(m.email))}">Remove</button>` : ""}</div></td></tr>`).join("")}
     </tbody></table></div>`}
-    ${owner ? `<form id="member-form" class="grid" style="margin-top:14px">
-      <div class="fld half"><label for="m-email">Add a person by email</label><input id="m-email" type="email" required placeholder="name@company.com.au"></div>
-      <div class="fld half"><label for="m-role">Access</label><select id="m-role"><option value="staff">Staff (can edit)</option><option value="viewer">View only</option><option value="owner">Owner</option></select></div>
-      <div class="fld"><small>They need a login first: send them this site's address and ask them to click "Create a login". Then add their email here.</small><div><button class="btn primary" type="submit">Add person</button></div></div></form>` : ""}
+    ${owner ? `<div class="chips" style="margin-top:14px"><button class="btn primary" data-act="add-login">+ Add person with username & password</button><button class="btn" data-act="add-by-email">Add someone who has their own login</button></div>
+      <p class="muted" style="margin:8px 0 0;font-size:13px">Username logins suit drivers: you choose the username and password and give them to the driver. No email needed.</p>` : ""}
     ${owner ? `<p class="muted" style="margin:14px 0 0;font-size:13px">Company ID, for setting up automatic km sync: <code>${esc(Store.company.id)}</code></p>` : ""}
   </section>` : ""}
   <section class="card"><header><h3>Reminder thresholds</h3></header>
@@ -407,6 +553,10 @@ function viewSettings() {
       <div class="fld half"><label for="s-avgWindow">Average km/day over the last (days)</label><input id="s-avgWindow" type="number" min="7" max="120" value="${esc(s.avgWindow)}"><small>Used to predict when km-based items fall due.</small></div>
       <div class="fld"><div><button class="btn primary" type="submit">Save settings</button></div></div>
     </form></section>
+  <section class="card"><header><h3>Prestart checklist</h3><span class="muted">What drivers tick off each Monday</span></header>
+    <form id="prestart-form" class="grid"><div class="fld"><label for="ps-items">One item per line</label><textarea id="ps-items" rows="10" style="font-family:var(--body);font-size:15px">${esc(prestartItems().join("\n"))}</textarea>
+      <small>Changes apply to new checks. Past checks keep the items they were done with.</small></div>
+      <div class="fld"><div class="chips"><button class="btn primary" type="submit">Save checklist</button><a class="btn" href="#driver">Preview the driver screen</a></div></div></form></section>
   <section class="card"><header><h3>How odometer estimates work</h3></header>
     <p style="margin:0;max-width:72ch">MyTrucking records how far each truck travels each day, not its odometer. Each vehicle keeps one actual odometer reading with its date, and the estimate is that reading plus every day's km recorded after it. When you log a service with an odometer reading, or use "Update odometer", the estimate resets to that real reading, which corrects any drift from missed days.</p></section>
   <section class="card"><header><h3>Export</h3></header><p class="muted" style="margin:0 0 10px">Download everything as a file, for your records or to open in Excel.</p>
@@ -828,32 +978,64 @@ document.addEventListener("click", async e => {
         try { await writeKm(entries); S.kmDraft = {}; toast(`Saved km for ${entries.length} vehicle${entries.length === 1 ? "" : "s"}`); } catch (x) { toast(x.message); }
         el.disabled = false; break;
       }
+      case "drv-ans": {
+        const st = drvState(), it = prestartItems()[Number(el.dataset.i)], cur = st.answers[it] || {};
+        st.answers[it] = { ...cur, status: el.dataset.s }; render(); break;
+      }
+      case "drv-allok": { const st = drvState(); for (const it of prestartItems()) if (!(st.answers[it] && st.answers[it].status)) st.answers[it] = { status: "ok" }; render(); break; }
+      case "drv-send": await sendCheck(el); break;
+      case "drv-new": { const keep = S.drv && S.drv.truckId; S.drv = null; drvState().truckId = keep || ""; render(); break; }
+      case "fix-defect": fixForm(S.defects.find(d => d.id === id)); break;
+      case "view-check": checkModal(S.checks.find(c => c.id === id)); break;
+      case "del-check": openConfirm("Delete check", "Delete this check and any defects it reported? This can't be undone.", "Delete", async () => { await guarded(() => Store.deleteCheck(id)); toast("Check deleted"); schedule(); }); break;
       case "export-csv": exportCsv(); break;
       case "export-json": exportJson(); break;
       case "change-pw": openForm({ title: "Change password", fields: [{ id: "pw", label: "New password", type: "password", req: true, hint: "At least 8 characters." }], onSubmit: async v => { if (v.pw.length < 8) throw new Error("Use at least 8 characters."); await Store.updatePassword(v.pw); toast("Password changed"); } }); break;
+      case "add-login": openForm({ title: "Add person", intro: "Choose a username and password, then give them to the person. They sign in with these on the site or their phone.", fields: [
+          { id: "username", label: "Username", req: true, half: true, placeholder: "e.g. jsmith", hint: "Letters, numbers, dots or dashes. No spaces." },
+          { id: "pw", label: "Password", req: true, half: true, hint: "At least 8 characters." },
+          { id: "role", label: "Access", type: "select", value: "driver", options: [{ v: "driver", t: "Driver (Monday checks only)" }, { v: "staff", t: "Staff (can edit)" }, { v: "viewer", t: "View only" }, { v: "owner", t: "Owner" }] }],
+          submit: "Create login", onSubmit: async v => { if (v.pw.length < 8) throw new Error("The password needs at least 8 characters."); await Store.createLogin(v.username, v.pw, v.role); toast(`Login created for ${v.username.toLowerCase()}`); await loadMembers(); } }); break;
+      case "add-by-email": openForm({ title: "Add someone with their own login", intro: "For people who created their own login with their email (\"Create a login\" on the sign-in screen).", fields: [
+          { id: "email", label: "Their email", type: "email", req: true },
+          { id: "role", label: "Access", type: "select", value: "staff", options: [{ v: "staff", t: "Staff (can edit)" }, { v: "viewer", t: "View only" }, { v: "driver", t: "Driver (Monday checks only)" }, { v: "owner", t: "Owner" }] }],
+          submit: "Add person", onSubmit: async v => { await Store.addMember(v.email, v.role); toast("Person added"); await loadMembers(); } }); break;
+      case "pw-member": openForm({ title: `New password for ${el.dataset.email}`, intro: "They'll use this next time they sign in. Let them know the new password.", fields: [{ id: "pw", label: "New password", req: true, hint: "At least 8 characters." }],
+          submit: "Set password", onSubmit: async v => { if (v.pw.length < 8) throw new Error("The password needs at least 8 characters."); await Store.setMemberPassword(id, v.pw); toast("Password changed"); } }); break;
       case "rm-member": openConfirm("Remove person", `Remove <b>${esc(el.dataset.email)}</b>? They'll no longer see ${esc(Store.company.name)}.`, "Remove", async () => { await Store.removeMember(id); toast("Removed"); await loadMembers(); }); break;
     }
   } catch (x) { toast(x.message || String(x)); }
 });
 document.addEventListener("input", e => {
+  if (S.drv) {
+    if (e.target.id === "drv-odo") { S.drv.odo = e.target.value; S.drv.odoWarned = false; }
+    if (e.target.id === "drv-notes") S.drv.notes = e.target.value;
+    if (e.target.classList.contains("drv-note")) { const it = prestartItems()[Number(e.target.dataset.i)]; S.drv.answers[it] = { ...(S.drv.answers[it] || {}), note: e.target.value }; }
+  }
   if (e.target.dataset && e.target.dataset.km) S.kmDraft[e.target.dataset.km] = e.target.value;
   if (e.target.id === "imp-text") S.importText = e.target.value;
 });
 document.addEventListener("change", async e => {
+  if (e.target.id === "drv-truck") { drvState().truckId = e.target.value; S.drv.odoWarned = false; render(); }
   if (e.target.id === "km-date") { S.kmDate = e.target.value || today(); S.kmDraft = {}; render(); }
   if (e.target.id === "imp-truck") S.importTruck = e.target.value;
   if (e.target.id === "imp-file" && e.target.files[0]) { const txt = await e.target.files[0].text(); S.importText = txt; S.importTruck = $("#imp-truck").value; S.importPreview = KmParse.parseImport(txt, S.trucks, S.importTruck); render(); }
 });
 document.addEventListener("submit", async e => {
-  const f = e.target; if (!["settings-form", "auth-form", "company-form", "member-form"].includes(f.id)) return;
+  const f = e.target; if (!["settings-form", "auth-form", "company-form", "member-form", "prestart-form"].includes(f.id)) return;
   e.preventDefault();
   const btn = f.querySelector("[type=submit]"); if (btn) btn.disabled = true;
   try {
     if (f.id === "settings-form") {
       if (Store.role === "viewer") throw new Error("You have view-only access.");
       const g = k => Number($("#s-" + k).value);
-      await Store.saveSettings({ soonKm: g("soonKm"), soonDays: g("soonDays"), lowTread: g("lowTread"), avgWindow: Math.min(120, Math.max(7, g("avgWindow") || 30)) });
+      await Store.saveSettings({ ...S.settings, soonKm: g("soonKm"), soonDays: g("soonDays"), lowTread: g("lowTread"), avgWindow: Math.min(120, Math.max(7, g("avgWindow") || 30)) });
       toast("Settings saved"); schedule();
+    } else if (f.id === "prestart-form") {
+      if (Store.role !== "owner" && Store.role !== "staff") throw new Error("Only the owner or staff can change the checklist.");
+      const list = $("#ps-items").value.split(/\r?\n/).map(x => x.trim()).filter(Boolean);
+      if (!list.length) throw new Error("Add at least one item.");
+      await Store.saveSettings({ ...S.settings, prestartItems: list }); toast("Checklist saved"); schedule();
     } else if (f.id === "member-form") {
       await Store.addMember($("#m-email").value.trim(), $("#m-role").value); toast("Person added"); await loadMembers();
     } else if (f.id === "company-form") {
@@ -874,8 +1056,9 @@ document.addEventListener("submit", async e => {
 document.addEventListener("keydown", e => { if (e.key === "Escape" && !$("#modal").hidden) closeModal(); });
 $("#modal").addEventListener("click", e => { if (e.target.id === "modal") closeModal(); });
 window.addEventListener("hashchange", () => { render(); window.scrollTo(0, 0); });
-window.addEventListener("focus", () => { if (Store.mode === "live") refresh(); });
-setInterval(() => { if (Store.mode === "live" && document.visibilityState === "visible" && $("#modal").hidden) refresh(); }, 120000);
+const busyDriver = () => S.drv && !S.drv.done && (Store.role === "driver" || route() === "driver") && (S.drv.odo || Object.keys(S.drv.answers).length);
+window.addEventListener("focus", () => { if (Store.mode === "live" && !busyDriver()) refresh(); });
+setInterval(() => { if (Store.mode === "live" && document.visibilityState === "visible" && $("#modal").hidden && !busyDriver()) refresh(); }, 120000);
 
 /* ---------- boot ---------- */
 async function enter(state) {
