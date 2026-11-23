@@ -3,8 +3,8 @@
 // To go live, paste the two values from Supabase (see the setup steps).
 // The "anon public" key is safe to publish: your data is protected by login and the database's security rules.
 window.BMT_CONFIG = {
-  supabaseUrl: "",
-  supabaseAnonKey: "",
+  supabaseUrl: "https://zaunkysxynifqbvgpgeu.supabase.co/rest/v1/",
+  supabaseAnonKey: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InphdW5reXN4eW5pZnFidmdwZ2V1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTU0MDg1MTIsImV4cCI6MjExMDk4NDUxMn0.axiCG1OGTpgOYcyA2Hg56dXb4eOA3Y7cbxz4IBMcLfY",
   companyName: "Brisbane Machinery Transport",
 
   // Offered as a one-click "Add vehicles" button while the fleet is empty.
